@@ -3,13 +3,18 @@ package main
 import (
 	"echo"
 	"flag"
+	"fmt"
 	"net"
+	"os"
 
 	"log"
 	"time"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+
+	ossignal "os/signal"
+	"syscall"
 
 	"google.golang.org/grpc/admin"
 	_ "google.golang.org/grpc/resolver" // use for "dns:///be.cluster.local:50051"
@@ -60,14 +65,31 @@ func main() {
 
 	c := echo.NewEchoServerClient(conn)
 	ctx := context.Background()
+	sigs := make(chan os.Signal, 1)
+	defer close(sigs)
+	ossignal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan bool, 1)
 
-	for i := 0; i < 30; i++ {
+	go func() {
+		sig := <-sigs
+		fmt.Println()
+		fmt.Println(sig)
+		done <- true
+	}()
+	ticker := time.NewTicker(2 * time.Second)
+	for i := 0; ; i++ {
 		r, err := c.SayHello(ctx, &echo.EchoRequest{Name: "unary RPC msg "})
 		if err != nil {
-			log.Fatalf("could not greet: %v", err)
+			log.Printf("RPC error: %v %v %v", i, r, err)
+		} else {
+			log.Printf("RPC Response: %v %v", i, r)
 		}
-		log.Printf("RPC Response: %v %v", i, r)
-		time.Sleep(2 * time.Second)
-	}
+		select {
+		case <-ticker.C:
+			continue
+		case <-done:
+			return
+		}
 
+	}
 }

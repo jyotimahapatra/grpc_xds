@@ -1,0 +1,7 @@
+{"clusterName":"be-srv-cluster", "endpoints":[
+    {"locality":{"region":"us-central1", "zone":"us-central1-a"}, 
+    "lbEndpoints":[
+        {"endpoint":{"address":{"socketAddress":{"address":"127.0.0.1", "portValue":50051}}}, "healthStatus":"HEALTHY"}, 
+        {"endpoint":{"address":{"socketAddress":{"address":"127.0.0.1", "portValue":50052}}}, "healthStatus":"UNHEALTHY"}, 
+        {"endpoint":{"address":{"socketAddress":{"address":"127.0.0.1", "portValue":50053}}}, "healthStatus":"HEALTHY"}],
+    "loadBalancingWeight":1000}]}

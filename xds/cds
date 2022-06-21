@@ -1,0 +1,1 @@
+{"name":"be-srv-cluster", "type":"EDS", "edsClusterConfig":{"edsConfig":{"ads":{}}}}

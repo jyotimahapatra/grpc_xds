@@ -39,9 +39,11 @@ func isGrpcRequest(r *http.Request) bool {
 }
 
 func (s *server) SayHello(ctx context.Context, in *echo.EchoRequest) (*echo.EchoReply, error) {
-
-	log.Println("Got rpc: --> ", in.Name)
-
+	//if *grpcport != ":50051" {
+	//	log.Println("Got rpc and return success: --> ", in.Name)
+	//	return &echo.EchoReply{Message: "Hello " + in.Name + "  from " + *servername}, nil
+	//}
+	log.Println("Got rpc and return success: --> ", in.Name)
 	return &echo.EchoReply{Message: "Hello " + in.Name + "  from " + *servername}, nil
 }
 

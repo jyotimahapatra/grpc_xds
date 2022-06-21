@@ -7,32 +7,30 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"net"
 
 	"sync"
-	"sync/atomic"
-	"time"
+
+	ossignal "os/signal"
+	"syscall"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
-	ep "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	lv2 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
-	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	cachev3 "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-	"github.com/golang/protobuf/ptypes"
+	"github.com/fsnotify/fsnotify"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/wrapperspb"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 // UpstreamPorts is a type that implements flag.Value interface
@@ -75,7 +73,7 @@ var (
 const (
 	localhost       = "127.0.0.1"
 	Ads             = "ads"
-	backendHostName = "be.cluster.local"
+	backendHostName = "127.0.0.1"
 	listenerName    = "be-srv"
 	routeConfigName = "be-srv-route"
 	clusterName     = "be-srv-cluster"
@@ -247,173 +245,121 @@ func main() {
 	nodeId := cache.GetStatusKeys()[0]
 	log.Infof(">>>>>>>>>>>>>>>>>>> creating NodeID %s", nodeId)
 
-	var lbendpoints []*ep.LbEndpoint
-	currentHost := 0
+	eds := &endpoint.ClusterLoadAssignment{}
+	cds := &cluster.Cluster{}
+	rds := &route.RouteConfiguration{}
+	lds := &listener.Listener{}
 
-	for {
-
-		if currentHost+1 <= len(upstreamPorts) {
-
-			v := upstreamPorts[currentHost]
-			currentHost++
-			// ENDPOINT
-			log.Infof(">>>>>>>>>>>>>>>>>>> creating ENDPOINT for remoteHost:port %s:%d", backendHostName, v)
-			hst := &core.Address{Address: &core.Address_SocketAddress{
-				SocketAddress: &core.SocketAddress{
-					Address:  backendHostName,
-					Protocol: core.SocketAddress_TCP,
-					PortSpecifier: &core.SocketAddress_PortValue{
-						PortValue: uint32(v),
-					},
-				},
-			}}
-
-			epp := &ep.LbEndpoint{
-				HostIdentifier: &ep.LbEndpoint_Endpoint{
-					Endpoint: &ep.Endpoint{
-						Address: hst,
-					}},
-				HealthStatus: core.HealthStatus_HEALTHY,
-			}
-			lbendpoints = append(lbendpoints, epp)
-
-			eds := []types.Resource{
-				&endpoint.ClusterLoadAssignment{
-					ClusterName: clusterName,
-					Endpoints: []*ep.LocalityLbEndpoints{{
-						Locality: &core.Locality{
-							Region: "us-central1",
-							Zone:   "us-central1-a",
-						},
-						Priority:            0,
-						LoadBalancingWeight: &wrapperspb.UInt32Value{Value: uint32(1000)},
-						LbEndpoints:         lbendpoints,
-					}},
-				},
-			}
-
-			// CLUSTER
-			log.Infof(">>>>>>>>>>>>>>>>>>> creating CLUSTER " + clusterName)
-			cls := []types.Resource{
-				&cluster.Cluster{
-					Name:                 clusterName,
-					LbPolicy:             cluster.Cluster_ROUND_ROBIN,
-					ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
-					EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
-						EdsConfig: &core.ConfigSource{
-							ConfigSourceSpecifier: &core.ConfigSource_Ads{},
-						},
-					},
-				},
-			}
-
-			// RDS
-			log.Infof(">>>>>>>>>>>>>>>>>>> creating RDS " + virtualHostName)
-
-			rds := []types.Resource{
-				&route.RouteConfiguration{
-					Name:             routeConfigName,
-					ValidateClusters: &wrapperspb.BoolValue{Value: true},
-					VirtualHosts: []*route.VirtualHost{{
-						Name:    virtualHostName,
-						Domains: []string{listenerName}, //******************* >> must match what is specified at xds:/// //
-						Routes: []*route.Route{{
-							Match: &route.RouteMatch{
-								PathSpecifier: &route.RouteMatch_Prefix{
-									Prefix: "",
-								},
-							},
-							Action: &route.Route_Route{
-								Route: &route.RouteAction{
-									ClusterSpecifier: &route.RouteAction_Cluster{
-										Cluster: clusterName,
-									},
-								},
-							},
-						},
-						},
-					}},
-				},
-			}
-
-			// LISTENER
-			log.Infof(">>>>>>>>>>>>>>>>>>> creating LISTENER " + listenerName)
-			hcRds := &hcm.HttpConnectionManager_Rds{
-				Rds: &hcm.Rds{
-					RouteConfigName: routeConfigName,
-					ConfigSource: &core.ConfigSource{
-						ResourceApiVersion: core.ApiVersion_V3,
-						ConfigSourceSpecifier: &core.ConfigSource_Ads{
-							Ads: &core.AggregatedConfigSource{},
-						},
-					},
-				},
-			}
-
-			hff := &router.Router{}
-			tctx, err := ptypes.MarshalAny(hff)
-			if err != nil {
-				log.Errorf("could not unmarshall router: %v\n", err)
-				os.Exit(1)
-			}
-
-			manager := &hcm.HttpConnectionManager{
-				CodecType:      hcm.HttpConnectionManager_AUTO,
-				RouteSpecifier: hcRds,
-				HttpFilters: []*hcm.HttpFilter{{
-					Name: wellknown.Router,
-					ConfigType: &hcm.HttpFilter_TypedConfig{
-						TypedConfig: tctx,
-					},
-				}},
-			}
-
-			pbst, err := ptypes.MarshalAny(manager)
-			if err != nil {
-				panic(err)
-			}
-
-			l := []types.Resource{
-				&listener.Listener{
-					Name: listenerName,
-					ApiListener: &lv2.ApiListener{
-						ApiListener: pbst,
-					},
-				}}
-
-			// rt := []types.Resource{}
-			// sec := []types.Resource{}
-
-			// =================================================================================
-			atomic.AddInt32(&version, 1)
-			log.Infof(">>>>>>>>>>>>>>>>>>> creating snapshot Version " + fmt.Sprint(version))
-			resources := make(map[resource.Type][]types.Resource, 4)
-			resources[resource.ClusterType] = cls
-			resources[resource.ListenerType] = l
-			resources[resource.RouteType] = rds
-			resources[resource.EndpointType] = eds
-
-			snap, err := cachev3.NewSnapshot(fmt.Sprint(version), resources)
-			if err != nil {
-				log.Fatalf("Could not set snapshot %v", err)
-			}
-			// cant get the consistent snapshot thing working anymore...
-			// https://github.com/envoyproxy/go-control-plane/issues/556
-			// https://github.com/envoyproxy/go-control-plane/blob/main/pkg/cache/v3/snapshot.go#L110
-			// if err := snap.Consistent(); err != nil {
-			// 	log.Errorf("snapshot inconsistency: %+v\n%+v", snap, err)
-			// 	os.Exit(1)
-			// }
-
-			//snap := cachev3.NewSnapshot(fmt.Sprint(version), eds, cls, rds, l, rt, sec)
-
-			err = cache.SetSnapshot(ctx, nodeId, snap)
-			if err != nil {
-				log.Fatalf("Could not set snapshot %v", err)
-			}
-
-			time.Sleep(10 * time.Second)
-		}
+	ldsF, err := os.ReadFile("lds")
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+	rdsF, err := os.ReadFile("rds")
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+	cdsF, err := os.ReadFile("cds")
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+	edsF, err := os.ReadFile("eds")
+	if err != nil {
+		log.Fatalf("error:", err)
 	}
 
+	err = protojson.Unmarshal(edsF, eds)
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+	err = protojson.Unmarshal(cdsF, cds)
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+	err = protojson.Unmarshal(rdsF, rds)
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+	err = protojson.Unmarshal(ldsF, lds)
+	if err != nil {
+		log.Fatalf("error:", err)
+	}
+
+	resources := make(map[resource.Type][]types.Resource, 4)
+	resources[resource.ClusterType] = []types.Resource{cds}
+	resources[resource.ListenerType] = []types.Resource{lds}
+	resources[resource.RouteType] = []types.Resource{rds}
+	resources[resource.EndpointType] = []types.Resource{eds}
+
+	snap, err := cachev3.NewSnapshot(fmt.Sprint(version), resources)
+	if err != nil {
+		log.Fatalf("Could not set snapshot %v", err)
+	}
+	err = cache.SetSnapshot(ctx, nodeId, snap)
+	if err != nil {
+		log.Fatalf("Could not set snapshot %v", err)
+	}
+
+	sigs := make(chan os.Signal, 1)
+	defer close(sigs)
+	ossignal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan bool, 1)
+	go func() {
+		sig := <-sigs
+		fmt.Println()
+		fmt.Println(sig)
+		done <- true
+	}()
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal("NewWatcher failed: ", err)
+	}
+	defer watcher.Close()
+	go func() {
+		defer close(done)
+
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				log.Printf("%s %s\n", event.Name, event.Op)
+				edsF, err = os.ReadFile("eds")
+				if err != nil {
+					log.Fatalf("error:", err)
+				}
+				fmt.Println(string(edsF))
+				err = protojson.Unmarshal(edsF, eds)
+				if err != nil {
+					log.Fatalf("error:", err)
+				}
+				resources[resource.EndpointType] = []types.Resource{eds}
+				atomic.AddInt32(&version, 1)
+				snap, err := cachev3.NewSnapshot(fmt.Sprint(version), resources)
+				if err != nil {
+					log.Fatalf("Could not set snapshot %v", err)
+				}
+				err = cache.SetSnapshot(ctx, nodeId, snap)
+				if err != nil {
+					log.Fatalf("Could not set snapshot %v", err)
+				}
+
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+
+	}()
+	err = watcher.Add("eds")
+	if err != nil {
+		log.Fatal("Add failed:", err)
+	}
+
+	fmt.Println("awaiting signal")
+	<-done
+	fmt.Println("exiting")
 }

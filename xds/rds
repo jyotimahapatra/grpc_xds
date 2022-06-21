@@ -1,0 +1,2 @@
+{"name":"be-srv-route", "virtualHosts":[
+    {"name":"be-srv-vs", "domains":["be-srv"], "routes":[{"match":{"prefix":""}, "route":{"cluster":"be-srv-cluster"}}]}], "validateClusters":true}

@@ -1,3 +1,16 @@
+
+## The initial setup has been copied from https://github.com/salrashid123/grpc_xds/ and changed based on my experiment to simulate apiserver to etcd behavior simulation
+### Setup
+- Open 5 terminals
+- On 3 terminals, run the following. These three represent etcd servers
+  - `cd app && go run src/grpc_server.go --grpcport :50051 --servername server1`
+  - `cd app && go run src/grpc_server.go --grpcport :50052 --servername server1`
+  - `cd app && go run src/grpc_server.go --grpcport :50053 --servername server1`
+- On 4th terminal run `cd xds && go run main.go` . This represents a program that can dynamically change grpc config
+- On 5th terminal run `cd app && export GRPC_XDS_BOOTSTRAP=$(pwd)/../xds_bootstrap.json && go run src/grpc_client.go --host xds:///be-srv`. This simulates the apiserver as a client connecting to etcd
+- After running the commands, you will see the client responses from server 1, 2, and 3 in round robin pattern.
+- For simulating dynamic config, edit the file `eds` and make one of the `healthStatus: HEALTHY` to `UNHEALTHY`. You'll notice the responses from the particular server go away in client logs.
+----------------------------------------------------------------------------------------------------------------------
 # gRPC xDS Loadbalancing
 
 Sample gRPC client/server application using  [xDS-Based Global Load Balancing](https://godoc.org/google.golang.org/grpc/xds)
